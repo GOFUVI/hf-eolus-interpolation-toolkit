@@ -1,0 +1,39 @@
+{
+  "overall": {
+    "total_functions": 30,
+    "covered_functions": 29,
+    "percent": 96.67
+  },
+  "files": [
+    {
+      "file": "scripts/modules/utils_module.R",
+      "functions": 14,
+      "covered": 13,
+      "percent": 92.86
+    },
+    {
+      "file": "scripts/modules/ingestion_module.R",
+      "functions": 2,
+      "covered": 2,
+      "percent": 100
+    },
+    {
+      "file": "scripts/modules/grid_module.R",
+      "functions": 1,
+      "covered": 1,
+      "percent": 100
+    },
+    {
+      "file": "scripts/modules/interpolation_module.R",
+      "functions": 10,
+      "covered": 10,
+      "percent": 100
+    },
+    {
+      "file": "scripts/modules/export_module.R",
+      "functions": 3,
+      "covered": 3,
+      "percent": 100
+    }
+  ]
+}

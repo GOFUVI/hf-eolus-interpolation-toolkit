@@ -1,0 +1,4 @@
+local_sync/
+local_sync_metadata/
+local_sync_plots/
+*.parquet
