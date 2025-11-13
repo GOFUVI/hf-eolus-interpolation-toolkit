@@ -1,9 +1,9 @@
 # Wind Interpolation Toolkit
 
 [![CI](https://github.com/GOFUVI/hf-eolus-interpolation-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/GOFUVI/hf-eolus-interpolation-toolkit/actions/workflows/ci.yml)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17131227.svg)](https://doi.org/10.5281/zenodo.17131227)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17598353.svg)](https://doi.org/10.5281/zenodo.17598353)
 
-This toolkit scales the wind-interpolation methodology originally prototyped for the Ría de Vigo (Fernández-Baladrón et al., 2020) so that it can run reproducibly on AWS. It ingests MeteoGalicia WRF model outputs, applies spatial interpolation (IDW, regression kriging, universal kriging), evaluates them against in situ observations, and publishes the resulting GeoParquet products using STAC catalogs.
+This toolkit scales the wind-interpolation methodology originally prototyped for the Ría de Vigo (Fernández-Baladrón et al., 2020) and formalised for AWS deployments in Herrera Cortijo et al. (2025) so that it can run reproducibly on AWS. It ingests MeteoGalicia WRF model outputs, applies spatial interpolation (IDW, regression kriging, universal kriging), evaluates them against in situ observations, and publishes the resulting GeoParquet products using STAC catalogs.
 
 ## AWS Architecture (high level)
 
@@ -146,7 +146,9 @@ By default it keeps the published copy of `case_study/catalogs/meteogalicia_inte
 
 ## Citation
 
-If you use this toolkit in research, please cite the Zenodo record: Fernández-Baladrón, A., Varela Benvenuto, R., & Herrera Cortijo, J. L. (2020). *Interrelationships between Surface Circulation and Wind in the Ría de Vigo.* Zenodo. https://doi.org/10.5281/zenodo.17490675.
+If you use this toolkit in research, please cite the Zenodo release documenting the software: Herrera Cortijo, J. L., Fernández-Baladrón, A., Rosón, G., Gil Coto, M., Dubert, J., & Varela Benvenuto, R. (2025). *HF-EOLUS Wind Interpolation Toolkit for MeteoGalicia models output (v0.1.0).* Zenodo. https://doi.org/10.5281/zenodo.17598353.
+
+If you discuss or build upon the original methodological study, please reference Fernández-Baladrón, A., Varela Benvenuto, R., & Herrera Cortijo, J. L. (2020). *Interrelationships between Surface Circulation and Wind in the Ría de Vigo.* Zenodo. https://doi.org/10.5281/zenodo.17490675.
 
 
 ## Acknowledgements
@@ -161,6 +163,7 @@ This software is provided "as is", without warranty of any kind, express or impl
 
 ## References
 
+- Herrera Cortijo, J. L., Fernández-Baladrón, A., Rosón, G., Gil Coto, M., Dubert, J., & Varela Benvenuto, R. (2025). *HF-EOLUS Wind Interpolation Toolkit for MeteoGalicia models output (v0.1.0).* Zenodo. https://doi.org/10.5281/zenodo.17598353
 - Fernández-Baladrón, A., Varela Benvenuto, R., & Herrera Cortijo, J. L. (2020). *Interrelationships between Surface Circulation and Wind in the Ría de Vigo*. Zenodo. https://doi.org/10.5281/zenodo.17490675
 
 ---
