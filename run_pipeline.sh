@@ -78,6 +78,7 @@ TEMPORAL_START=${PIPELINE_TEMPORAL_START:-"${INTERP_START}T00:00:00Z"}
 TEMPORAL_END=${PIPELINE_TEMPORAL_END:-"${INTERP_END}T23:00:00Z"}
 ITEM_OVERRIDES=${PIPELINE_STAC_ITEM_OVERRIDES:-case_study/stac_overrides/item_override.json}
 COLLECTION_OVERRIDES=${PIPELINE_STAC_COLLECTION_OVERRIDES:-case_study/stac_overrides/collection_override.json}
+STAC_INCREMENTAL=${PIPELINE_STAC_INCREMENTAL:-0}
 
 BUOY_CONFIG=${PIPELINE_BUOY_CONFIG:-}
 BUOY_REPORTS_DIR=${PIPELINE_BUOY_REPORTS_DIR:-reports/buoys}
@@ -168,6 +169,9 @@ if [[ -n "$COLLECTION_OVERRIDES" ]]; then
     die "Collection overrides file not found at $COLLECTION_OVERRIDES"
   fi
   STAC_ARGS+=(--collection-overrides "$COLLECTION_OVERRIDES")
+fi
+if [[ $STAC_INCREMENTAL -eq 1 ]]; then
+  STAC_ARGS+=(--incremental)
 fi
 ./scripts/run_build_stac_catalog.sh "${STAC_ARGS[@]}"
 

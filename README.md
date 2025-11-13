@@ -65,6 +65,7 @@ The script reads `PIPELINE_*` variables (see below) and executes the entire sequ
 | `PIPELINE_OUTPUT_PREFIX` | Destination for interpolation GeoParquet | `s3://${PIPELINE_BUCKET_NAME}/meteogalicia/interpolation`
 | `PIPELINE_PLOTS_PREFIX` | Destination for plots (quadrants, diagnostics) | `s3://${PIPELINE_BUCKET_NAME}/meteogalicia/interp_plots`
 | `PIPELINE_METADATA_PREFIX` | Destination for metadata sidecars | `s3://${PIPELINE_BUCKET_NAME}/meteogalicia/metadata/interpolation`
+| `PIPELINE_STAC_INCREMENTAL` | Set to `1` to pass `--incremental` to the STAC builder and keep existing catalog assets untouched | `0`
 | `PIPELINE_RES_FACTOR`, `PIPELINE_CUTOFF_KM`, `PIPELINE_WIDTH_KM`, `PIPELINE_SUBSAMPLE_PCT`, `PIPELINE_NMAX_MODEL`, `PIPELINE_NFOLD` | Interpolation hyperparameters | tuned per run
 | `PIPELINE_BUOY_CONFIG` | Path to a JSON plan describing one or more buoys to compare against (enables the optional report step) | unset (disabled)
 | `PIPELINE_BUOY_REPORTS_DIR` | Directory (relative to the repository) where reports are written as `reports/<buoy>/` | `reports/buoys`
@@ -124,6 +125,8 @@ scripts/run_build_stac_catalog.sh \
 
 The wrapper automatically syncs S3 prefixes (data, metadata, plots) to `local_sync*` folders, mounts the repository into the container, and cleans up temporary directories. Override files let you add extra properties or assets without modifying the generator. If the target catalog already exists, compare manifests (for example with `diff -u <(find catalog -type f -print | sort) ...`) before publishing.
 
+Pass `--incremental` when you only need to add new partitions: the flag preserves the already published assets and Items, copying and emitting STAC metadata solely for the files that were not present in previous runs (the catalog JSON is still regenerated so collection-level metadata stays consistent). When running the full pipeline via `run_pipeline.sh`, set `PIPELINE_STAC_INCREMENTAL=1` before launching it to forward the same behaviour.
+
 ## Reproducibility and case studies
 
 Case studies are published in a separate repository that stores the boundary files, validation points, STAC overrides and reference catalogs (for example, `hf-eolus-task-3-interpolation-outputs`). Clone that repository alongside the toolkit, configure the `PIPELINE_*` variables to point to the case-study assets, and run its `run_pipeline_case_study.sh` wrapper, explicitly passing the bucket and region label you want to use:
@@ -156,7 +159,9 @@ This work has been funded by the HF-EOLUS project (TED2021-129551B-I00), finance
 
 This software is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and noninfringement. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability, whether in an action of contract, tort, or otherwise, arising from, out of, or in connection with the software or the use or other dealings in the software.
 
+## References
 
+- Fernández-Baladrón, A., Varela Benvenuto, R., & Herrera Cortijo, J. L. (2020). *Interrelationships between Surface Circulation and Wind in the Ría de Vigo*. Zenodo. https://doi.org/10.5281/zenodo.17490675
 
 ---
 <p align="center">

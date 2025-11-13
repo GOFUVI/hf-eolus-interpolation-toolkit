@@ -118,6 +118,7 @@ Opciones adicionales:
 - `--plots-prefix <prefijo>`: ruta con los PNG de diagnósticos (grid, variogramas, etc.) para añadirlos como assets `overview`. Con prefijos S3 se replica en `<sync-target>_plots/` cuando la sincronización está activa.
 - `--item-overrides <ruta.json>`: fusiona el JSON indicado sobre todos los Items (datos, metadatos y plots) antes de guardarlos (se preservan los `href` de los assets generados por el script).
 - `--collection-overrides <ruta.json>`: fusiona el JSON indicado en la Collection resultante (título, keywords, providers, extra_fields, etc.).
+- `--incremental`: skips partitions that are already cataloged under `output-dir`, keeping existing assets untouched and only copying/emitting Items for the GeoParquet files that were not present before.
 
 Los JSON de ejemplo para overrides se encuentran en `case_study/stac_overrides/`.
 
@@ -134,6 +135,8 @@ python scripts/11-build_stac_catalog.py \
   --region Galicia \
   --temporal-start 2025-01-01T00:00:00Z \
   --temporal-end 2025-01-31T23:00:00Z
+
+# Add `--incremental` when you only need to append new partitions without touching the existing Items.
 ```
 
 To inject custom STAC metadata, provide JSON files with the structures to merge (for example `case_study/stac_overrides/item_override_example.json` for Items or `case_study/stac_overrides/collection_override_example.json` for the Collection) and pass them with `--item-overrides` / `--collection-overrides` (the merge is deep and respects standard STAC fields).
@@ -144,6 +147,7 @@ Key behaviour:
 - Data, metadata JSON and diagnostic plots are copied into `assets/` (parquet/metadata/plots) so the catalog is self-contained; corresponding Items are grouped under `items/parquet`, `items/metadata`, and `items/plots`, each with its own subcatalog.
 - `--asset-href-prefix` rewrites Item asset URLs when you prefer remote HREFs instead of copying assets.
 - `--metadata-prefix`/`--plots-prefix` copy the matching sidecars into `assets/metadata/` and `assets/plots/` and expose them as overview catalogs.
+- `--incremental` skips GeoParquet assets that already live under `output-dir`, so the generator only needs to copy and index the newly produced partitions (existing Items remain untouched on disk while the Collection metadata is refreshed).
 
 After creating a new collection, add a new child link to `case_study/catalogs/catalog.json` so the top-level catalog advertises it without modifying the existing `case_study/catalogs/pde_vilano_buoy` structure.
 
