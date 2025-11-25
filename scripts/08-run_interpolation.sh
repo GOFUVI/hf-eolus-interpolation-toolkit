@@ -183,13 +183,13 @@ echo "Todos los trabajos enviados: ${JOB_IDS[*]}"
 describe_jobs_in_chunks() {
     local query="$1"
     shift
-    local -n _ids_ref=$1
+    local ids=("$@")
     local results=()
     local chunk_size=100
-    local total=${#_ids_ref[@]}
+    local total=${#ids[@]}
     local i=0
     while [[ $i -lt $total ]]; do
-        local chunk=("${_ids_ref[@]:i:chunk_size}")
+        local chunk=("${ids[@]:i:chunk_size}")
         local response
         response=$(aws batch describe-jobs --jobs "${chunk[@]}" --profile "$PROFILE" \
             --region "$AWS_REGION" --query "$query" --output text)
@@ -205,7 +205,7 @@ describe_jobs_in_chunks() {
 echo "Monitoreando jobs..."
 # Esperar a que todos los jobs alcancen estado terminal
 while true; do
-    read -r -a STATUSES <<<"$(describe_jobs_in_chunks "jobs[*].status" JOB_IDS)"
+    read -r -a STATUSES <<<"$(describe_jobs_in_chunks "jobs[*].status" "${JOB_IDS[@]}")"
     total=${#STATUSES[@]}
     terminal=0
     for st in "${STATUSES[@]}"; do
@@ -220,7 +220,7 @@ while true; do
     sleep 10
 done
 # Verificar jobs fallidos
-read -r -a FAILED_IDS_ARR <<<"$(describe_jobs_in_chunks "jobs[?status=='FAILED'].jobId" JOB_IDS)"
+read -r -a FAILED_IDS_ARR <<<"$(describe_jobs_in_chunks "jobs[?status=='FAILED'].jobId" "${JOB_IDS[@]}")"
 if [[ ${#FAILED_IDS_ARR[@]} -gt 0 ]]; then
     FAILED_IDS="${FAILED_IDS_ARR[*]}"
     echo "Algunos jobs fallaron: $FAILED_IDS" >&2

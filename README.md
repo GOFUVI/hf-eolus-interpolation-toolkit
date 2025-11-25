@@ -102,7 +102,7 @@ After publishing the STAC catalog you can automatically compare the interpolated
 ]
 ```
 
-When `PIPELINE_BUOY_CONFIG` is set, `run_pipeline.sh` executes `scripts/compare_pde_buoy.R` once per entry, storing metrics (RMSE, RSR, bias), aligned CSVs, plots and Markdown reports under `PIPELINE_BUOY_REPORTS_DIR/<buoy>/` (defaults to `reports/buoys/<buoy>/`). The comparison script reads the GeoParquet predictions from `PIPELINE_BUOY_PREDICTION_PATH`; by default it targets `local_sync/`, the directory populated by `scripts/run_build_stac_catalog.sh` whenever it synchronises the interpolation outputs from S3.
+When `PIPELINE_BUOY_CONFIG` is set, `run_pipeline.sh` executes `scripts/compare_pde_buoy.R` once per entry, storing metrics (RMSE, RSR, bias), aligned CSVs, plots and Markdown reports under `PIPELINE_BUOY_REPORTS_DIR/<buoy>/` (defaults to `reports/buoys/<buoy>/`). The comparison script reads the GeoParquet predictions from `PIPELINE_BUOY_PREDICTION_PATH`; by default it targets `local_sync/`, the directory populated by `scripts/run_build_stac_catalog.sh` whenever it synchronises the interpolation outputs from S3. You can optionally harmonise buoy winds to a 10 m reference using a neutral logarithmic profile: pass `--buoy-height-correction` together with `--source-height` (default 3), `--target-height` (default 10) and `--roughness` (default 0.0002 m) either globally or per entry in the JSON plan. The report and metrics CSVs annotate the observation height used.
 
 The repository ships `case_study/buoy_comparison_config.json` with the PdE Vilano buoy definition so that case-study reproductions can enable the step with a single flag (see the case study README below).
 
@@ -126,6 +126,28 @@ scripts/run_build_stac_catalog.sh \
 The wrapper automatically syncs S3 prefixes (data, metadata, plots) to `local_sync*` folders, mounts the repository into the container, and cleans up temporary directories. Override files let you add extra properties or assets without modifying the generator. If the target catalog already exists, compare manifests (for example with `diff -u <(find catalog -type f -print | sort) ...`) before publishing.
 
 Pass `--incremental` when you only need to add new partitions: the flag preserves the already published assets and Items, copying and emitting STAC metadata solely for the files that were not present in previous runs (the catalog JSON is still regenerated so collection-level metadata stays consistent). When running the full pipeline via `run_pipeline.sh`, set `PIPELINE_STAC_INCREMENTAL=1` before launching it to forward the same behaviour.
+
+### Subsetting a STAC catalog
+
+To extract a smaller STAC collection and a single Parquet/GeoParquet with only a subset of nodes or within a polygon, use the Docker wrapper around `scripts/12-subset_stac_nodes.py`:
+
+```bash
+scripts/run_subset_stac_nodes.sh \
+  --catalog case_study/catalogs/meteogalicia_interpolation/catalog.json \
+  --output-dir catalogs/interpolated_galicia_2025_subsets/vilano \
+  --node-id Vilano_buoy \
+  --polygon path/to/aoi.geojson
+```
+
+The wrapper reuses the STAC Docker image and mounts the repository, so no host Python setup is needed. Key flags:
+- `--catalog <path_or_url>`: root catalog or collection to read (S3 or local).
+- `--output-dir <path>`: destination for the derived catalog and filtered Parquet/GeoParquet.
+- `--node-id <name>[,<name>...]`: filter by one or more `node_id` values.
+- `--polygon <path>`: GeoJSON/JSON Polygon or MultiPolygon used to clip the rows.
+- `--output-format parquet|geoparquet`: choose the output format (GeoParquet is default when geometry is kept).
+- `--aws-profile`, `--aws-region`: forwarded to `aws s3 sync` when reading from S3.
+
+You can also call `scripts/12-subset_stac_nodes.py` directly if the dependencies (`pyarrow`, `pystac`, `shapely`, `duckdb`) are available in your Python environment.
 
 ## Reproducibility and case studies
 

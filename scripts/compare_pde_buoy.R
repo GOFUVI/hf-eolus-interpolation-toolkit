@@ -27,6 +27,10 @@ Usage:
     [--buoy-item=Vilano] \\
     [--buoy-config=<path_to_json_plan>] \\
     [--prediction-node-id=Vilano_buoy] \\
+    [--buoy-height-correction=true|false] \\
+    [--source-height=<meters>] \\
+    [--target-height=<meters>] \\
+    [--roughness=<meters>] \\
     [--report-name=vilano_report.md] \\
     [--obs-start=YYYY-MM-DDTHH:MM:SSZ] \\
     [--obs-end=YYYY-MM-DDTHH:MM:SSZ] \\
@@ -151,6 +155,20 @@ resolve_href <- function(base_dir, href) {
   normalizePath(file.path(base_dir, href), mustWork = TRUE)
 }
 
+parse_bool <- function(value, default = FALSE) {
+  if (is.null(value)) return(default)
+  val <- tolower(as.character(value))
+  val %in% c("1", "true", "yes", "on")
+}
+
+apply_height_correction <- function(speed, source_height, target_height, roughness) {
+  if (!is.finite(source_height) || !is.finite(target_height) || !is.finite(roughness)) {
+    stop("Invalid height-correction parameters.")
+  }
+  factor <- log(target_height / roughness) / log(source_height / roughness)
+  ifelse(is.na(speed), NA_real_, speed * factor)
+}
+
 load_buoy_plan <- function(config_path, global_cfg) {
   config_abs <- normalizePath(config_path, mustWork = TRUE)
   config_dir <- dirname(config_abs)
@@ -227,6 +245,10 @@ load_buoy_plan <- function(config_path, global_cfg) {
 
     node_id <- entry$node_id %||% entry$prediction_node_id %||% slug
     report_name <- entry$report_name %||% sprintf("%s_report.md", slug)
+    buoy_height_correction <- parse_bool(entry$buoy_height_correction, global_cfg$buoy_height_correction)
+    source_height <- as.numeric(entry$source_height %||% entry$obs_height %||% global_cfg$source_height)
+    target_height <- as.numeric(entry$target_height %||% global_cfg$target_height)
+    roughness <- as.numeric(entry$roughness %||% global_cfg$roughness)
     list(
       id = slug,
       label = label,
@@ -239,12 +261,23 @@ load_buoy_plan <- function(config_path, global_cfg) {
       obs_start = resolve_datetime(entry$obs_start %||% entry$observation_start),
       obs_end = resolve_datetime(entry$obs_end %||% entry$observation_end),
       pred_start = resolve_datetime(entry$pred_start %||% entry$prediction_start),
-      pred_end = resolve_datetime(entry$pred_end %||% entry$prediction_end)
+      pred_end = resolve_datetime(entry$pred_end %||% entry$prediction_end),
+      buoy_height_correction = buoy_height_correction,
+      source_height = source_height,
+      target_height = target_height,
+      roughness = roughness
     )
   })
 }
 
-load_buoy_data <- function(catalog_path, item_id, start_time, end_time) {
+load_buoy_data <- function(catalog_path,
+                           item_id,
+                           start_time,
+                           end_time,
+                           apply_correction = FALSE,
+                           source_height = 3,
+                           target_height = 10,
+                           roughness = 0.0002) {
   catalog_dir <- normalizePath(dirname(catalog_path), mustWork = TRUE)
   item_path <- file.path(catalog_dir, "items", paste0(item_id, ".json"))
   if (!file.exists(item_path)) {
@@ -278,6 +311,11 @@ load_buoy_data <- function(catalog_path, item_id, start_time, end_time) {
   }
   if (!nrow(obs_tbl)) {
     stop("No buoy observations left after applying the requested filters.")
+  }
+
+  if (apply_correction) {
+    obs_tbl <- obs_tbl %>%
+      mutate(wind_speed = apply_height_correction(wind_speed, source_height, target_height, roughness))
   }
 
   obs_tbl <- obs_tbl %>%
@@ -525,7 +563,11 @@ execute_comparison <- function(run_cfg) {
     catalog_path = run_cfg$buoy_catalog,
     item_id = run_cfg$buoy_item,
     start_time = run_cfg$obs_start,
-    end_time = run_cfg$obs_end
+    end_time = run_cfg$obs_end,
+    apply_correction = run_cfg$buoy_height_correction,
+    source_height = run_cfg$source_height,
+    target_height = run_cfg$target_height,
+    roughness = run_cfg$roughness
   )
 
   predictions <- load_prediction_data(
@@ -552,6 +594,23 @@ execute_comparison <- function(run_cfg) {
   metrics_components <- compute_component_metrics(aligned)
   metrics_speed <- compute_speed_metrics(aligned)
 
+  metrics_speed <- metrics_speed %>%
+    mutate(
+      obs_height_correction = run_cfg$buoy_height_correction,
+      source_height_m = run_cfg$source_height,
+      target_height_m = run_cfg$target_height,
+      roughness_m = run_cfg$roughness,
+      obs_height_m = if (run_cfg$buoy_height_correction) run_cfg$target_height else run_cfg$source_height
+    )
+  metrics_components <- metrics_components %>%
+    mutate(
+      obs_height_correction = run_cfg$buoy_height_correction,
+      source_height_m = run_cfg$source_height,
+      target_height_m = run_cfg$target_height,
+      roughness_m = run_cfg$roughness,
+      obs_height_m = if (run_cfg$buoy_height_correction) run_cfg$target_height else run_cfg$source_height
+    )
+
   metrics_combined <- bind_rows(metrics_speed, metrics_components)
   metrics_path <- file.path(run_cfg$output_dir, "metrics.csv")
   write.csv(metrics_combined, metrics_path, row.names = FALSE)
@@ -576,7 +635,11 @@ execute_comparison <- function(run_cfg) {
       buoy_catalog = run_cfg$buoy_catalog,
       buoy_item = run_cfg$buoy_item,
       prediction_path = run_cfg$prediction_path,
-      prediction_node_id = run_cfg$node_id
+      prediction_node_id = run_cfg$node_id,
+      buoy_height_correction = run_cfg$buoy_height_correction,
+      source_height = run_cfg$source_height,
+      target_height = run_cfg$target_height,
+      roughness = run_cfg$roughness
     )
   )
 
@@ -650,12 +713,20 @@ write_report <- function(output_dir,
                          config) {
   catalog_path_display <- format_relative_path(config$buoy_catalog)
   prediction_path_display <- format_relative_path(config$prediction_path)
+  height_line <- if (isTRUE(config$buoy_height_correction)) {
+    sprintf("- Observation height: corrected from %.1f m to %.1f m (log profile, z0=%.4f m)",
+            config$source_height, config$target_height, config$roughness)
+  } else {
+    sprintf("- Observation height: native %.1f m (no height correction applied)",
+            config$source_height)
+  }
 
   report_lines <- c(
     sprintf("# %s Comparison", config$label),
     "",
     sprintf("- Buoy catalog: `%s` (item: `%s`)", catalog_path_display, config$buoy_item),
     sprintf("- Prediction dataset: `%s` (node: `%s`)", prediction_path_display, config$prediction_node_id),
+    height_line,
     sprintf("- Observation window: %s to %s",
             format(min(aligned$timestamp_obs_original), "%Y-%m-%d %H:%MZ"),
             format(max(aligned$timestamp_obs_original), "%Y-%m-%d %H:%MZ")),
@@ -699,7 +770,11 @@ main <- function() {
     obs_end = resolve_datetime(args[["obs-end"]]),
     pred_start = resolve_datetime(args[["pred-start"]]),
     pred_end = resolve_datetime(args[["pred-end"]]),
-    buoy_config = args[["buoy-config"]]
+    buoy_config = args[["buoy-config"]],
+    buoy_height_correction = parse_bool(args[["buoy-height-correction"]], FALSE),
+    source_height = as.numeric(args[["source-height"]] %||% 3),
+    target_height = as.numeric(args[["target-height"]] %||% 10),
+    roughness = as.numeric(args[["roughness"]] %||% 0.0002)
   )
 
   if (is.null(cfg$output_dir) || !nzchar(cfg$output_dir)) {
@@ -745,7 +820,11 @@ main <- function() {
     obs_start = cfg$obs_start,
     obs_end = cfg$obs_end,
     pred_start = cfg$pred_start,
-    pred_end = cfg$pred_end
+    pred_end = cfg$pred_end,
+    buoy_height_correction = cfg$buoy_height_correction,
+    source_height = cfg$source_height,
+    target_height = cfg$target_height,
+    roughness = cfg$roughness
   )
 
   execute_comparison(run_cfg)

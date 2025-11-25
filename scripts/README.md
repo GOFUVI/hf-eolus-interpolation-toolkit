@@ -9,7 +9,9 @@ This directory contains scripts to perform spatial interpolation of wind data us
 - `07-setup_aws_resources.sh`: Bash script to create an S3 bucket (if it doesn't exist) and an IAM role with limited access to that bucket.
 - `10-update_geoparquet_regions.py`: Python script to add or remove region definitions in a GeoParquet file by updating the `metadata/.../metadata.json` sidecar (and legacy `regions` columns when present); supports `--add` to append a region JSON object and `--remove` to delete a region by name.
 - `11-build_stac_catalog.py`: Python CLI that inspects the interpolation GeoParquet outputs (local folders or S3 prefixes) and generates a STAC Collection with one Item per partition. The script guarantees the mandatory STAC fields (`bbox`, `datetime`, `assets`) and can optionally copy the GeoParquet payloads into the catalog for offline distribution.
-- `run_build_stac_catalog.sh`: Shell wrapper that builds (on first use) a Docker image with the Python dependencies (`pyarrow`, `pystac`, `shapely`), sincroniza (por defecto) los prefijos S3 de datos, metadatos y plots hacia disco local con `aws s3 sync`, y finalmente invoca `11-build_stac_catalog.py` dentro del contenedor.
+- `12-subset_stac_nodes.py`: Python CLI that, given a STAC catalog of interpolation outputs, filters rows by `node_id` and/or a Polygon/MultiPolygon geometry using DuckDB (Docker `duckdb/duckdb:latest` or local fallback), writes a single Parquet/GeoParquet with the subset, and emits a derived STAC collection that inherits the original metadata and registers itself in the parent `catalog.json` when present.
+- `run_build_stac_catalog.sh`: Shell wrapper that builds (on first use) a Docker image with the Python dependencies (`pyarrow`, `pystac`, `shapely`), synchronizes (by default) the S3 prefixes for data, metadata, and plots to local disk with `aws s3 sync`, and finally invokes `11-build_stac_catalog.py` inside the container.
+- `run_subset_stac_nodes.sh`: Lightweight wrapper that reuses the STAC catalog Docker image (or builds it if missing) and runs `12-subset_stac_nodes.py` inside the container, avoiding any dependence on host Python libraries.
 
 ## Prerequisites
 - R 4.0 or higher *or* Docker.
@@ -73,6 +75,10 @@ The script sequentially provisions IAM roles, deploys the Lambda ingestion image
 # the `-n <subsample_pct>` flag controls the percentage of the remaining data
 # used for variogram estimation and cross-validation.
 
+### Buoy comparison helper
+
+`scripts/compare_pde_buoy.R` can be invoked on a STAC-described buoy GeoParquet and a prediction dataset (folder or file) to emit aligned pairs, metrics CSVs, plots and a Markdown summary. It now supports harmonising the buoy winds to 10 m using a neutral logarithmic profile via `--buoy-height-correction` plus `--source-height` (default 3), `--target-height` (default 10) and `--roughness` (default 0.0002). When enabled, the report and CSVs annotate the observation height used; flags can also be set per-entry when using `--buoy-config` for multi-buoy runs.
+
 ## Docker Execution
 Alternatively, run within Docker:
 ```bash
@@ -89,7 +95,7 @@ Results are saved as GeoParquet files partitioned by year/month/day/hour, with e
 
 Use either the Docker wrapper or the Python CLI to convert the partitioned GeoParquet outputs into a STAC Collection.
 
-### Docker wrapper (recommended para sincronizar S3 y generar el catálogo localmente)
+### Docker wrapper (recommended to sync S3 and generate the catalog locally)
 
 ```bash
 scripts/run_build_stac_catalog.sh \
@@ -102,25 +108,53 @@ scripts/run_build_stac_catalog.sh \
   --temporal-end 2025-01-31T23:00:00Z
 ```
 
-El wrapper:
-- Construye (si no existe) la imagen `wind-interpolation-stac:latest` con `pyarrow`, `pystac` y `shapely`.
-- Si `--input-root` o `--sync-prefix` apuntan a `s3://`, ejecuta `aws s3 sync` hacia `local_sync/` dentro del repositorio (o el directorio pasado con `--sync-target`). Puedes indicar el perfil con `--aws-profile hf_eolus`; la región se obtiene automáticamente de la configuración de ese perfil (puedes forzarla con `--aws-region eu-west-3`).
-- Cuando `--metadata-prefix` o `--plots-prefix` señalan a S3 y no se usa `--skip-sync`, replica automáticamente esos prefijos en `<sync-target>_metadata/` y `<sync-target>_plots/` (o `local_sync_metadata/` y `local_sync_plots/` por defecto) y pasa las rutas locales al contenedor.
-- Lanza el script Python dentro del contenedor utilizando la ruta local sincronizada.
+The wrapper:
+- Builds (if missing) the `wind-interpolation-stac:latest` image with `pyarrow`, `pystac`, and `shapely`.
+- If `--input-root` or `--sync-prefix` points to `s3://`, runs `aws s3 sync` to `local_sync/` inside the repository (or the directory passed with `--sync-target`). You can pick the profile via `--aws-profile hf_eolus`; the region is inferred from that profile (or forced with `--aws-region eu-west-3`).
+- When `--metadata-prefix` or `--plots-prefix` point to S3 and `--skip-sync` is not used, it mirrors those prefixes into `<sync-target>_metadata/` and `<sync-target>_plots/` (or `local_sync_metadata/` and `local_sync_plots/` by default) and passes the local paths to the container.
+- Invokes the Python script inside the container using the locally synced paths.
 
-Opciones adicionales:
-- `--sync-prefix s3://bucket/prefix`: define explícitamente el prefijo a sincronizar (si se omite y `--input-root` es un S3 URI, se usa automáticamente).
-- `--sync-target <ruta>`: cambia el directorio local donde se replica el prefijo (por defecto `local_sync/`).
-- `--skip-sync`: desactiva la sincronización (útil si ya tienes los datos descargados); asegúrate entonces de que `--input-root` apunta a la copia local.
-- `--aws-profile <perfil>`: ejecuta el `aws s3 sync` con ese perfil y deriva la región por defecto de su configuración.
-- `--aws-region <región>`: fuerza la región utilizada durante la sincronización (sobrescribe la obtenida del perfil o de variables de entorno).
-- `--metadata-prefix <prefijo>`: ruta (local o S3) con los metadata.json generados por la interpolación, se añaden como assets con rol `metadata`. Si el prefijo es S3 (y no se usa `--skip-sync`), se copia automáticamente a `<sync-target>_metadata/`.
-- `--plots-prefix <prefijo>`: ruta con los PNG de diagnósticos (grid, variogramas, etc.) para añadirlos como assets `overview`. Con prefijos S3 se replica en `<sync-target>_plots/` cuando la sincronización está activa.
-- `--item-overrides <ruta.json>`: fusiona el JSON indicado sobre todos los Items (datos, metadatos y plots) antes de guardarlos (se preservan los `href` de los assets generados por el script).
-- `--collection-overrides <ruta.json>`: fusiona el JSON indicado en la Collection resultante (título, keywords, providers, extra_fields, etc.).
-- `--incremental`: skips partitions that are already cataloged under `output-dir`, keeping existing assets untouched and only copying/emitting Items for the GeoParquet files that were not present before.
+Additional options:
+- `--sync-prefix s3://bucket/prefix`: explicitly sets the prefix to sync (if omitted and `--input-root` is an S3 URI, it is inferred automatically).
+- `--sync-target <path>`: directory where the prefix is mirrored locally (default `local_sync/`).
+- `--skip-sync`: disables synchronization (useful if you already downloaded the data); ensure `--input-root` then points to the local copy.
+- `--aws-profile <profile>`: runs `aws s3 sync` with that profile and derives the default region from its config.
+- `--aws-region <region>`: forces the region used during sync (overrides the one from the profile or env variables).
+- `--metadata-prefix <prefix>`: path (local or S3) to interpolation metadata JSON sidecars, added as `metadata` assets. If S3 (and `--skip-sync` is not set), they are copied automatically to `<sync-target>_metadata/`.
+- `--plots-prefix <prefix>`: path to diagnostic PNGs (grid, variograms, etc.) to add as `overview` assets. S3 prefixes are mirrored to `<sync-target>_plots/` when sync is enabled.
+- `--item-overrides <path.json>`: deep-merges the provided JSON into every Item (data, metadata, plots) before saving (keeping the generated asset `href` values).
+- `--collection-overrides <path.json>`: deep-merges the provided JSON into the resulting Collection (title, keywords, providers, `extra_fields`, etc.).
+- `--incremental`: skips partitions already cataloged under `output-dir`, keeps existing assets untouched, and only copies/emits Items for new GeoParquet files.
+- `--by-year` (optionally `--years 2018,2019,...`): iterates one `year=YYYY` partition at a time, syncing only that year's assets/metadata/plots into a temporary staging folder (`<output-dir>/.stac_year_build`). Year detection scans local `year=*` folders or, for S3 inputs, runs `aws s3 ls` on the prefix. The wrapper auto-enables `--incremental`, keeps asset `href`s anchored to the original prefix via `--asset-href-prefix`, and rejects `--skip-sync` when any input prefix is on S3.
+  If the target catalog already contains all Items for a given year (the Item count matches the source parquet count), that year is skipped automatically.
 
-Los JSON de ejemplo para overrides se encuentran en `case_study/stac_overrides/`.
+Example override JSON files live in `case_study/stac_overrides/`.
+
+## Subsetting STAC outputs
+
+`scripts/12-subset_stac_nodes.py` filters an interpolation catalog by `node_id` and/or geometry and emits:
+- a single Parquet/GeoParquet with the subset of rows, and
+- a derived STAC collection/item set registered under the parent `catalog.json` when present.
+
+Recommended usage via Docker (keeps dependencies isolated):
+
+```bash
+scripts/run_subset_stac_nodes.sh \
+  --catalog case_study/catalogs/meteogalicia_interpolation/catalog.json \
+  --output-dir case_study/catalogs/meteogalicia_interpolation_subsets/vilano \
+  --node-id Vilano_buoy \
+  --polygon aoi.geojson
+```
+
+Key flags (also available directly in the Python CLI):
+- `--catalog <path_or_url>`: root catalog or collection to read.
+- `--output-dir <path>`: where the derived catalog and Parquet/GeoParquet will be written.
+- `--node-id <name>[,<name>...]`: include only these `node_id` values.
+- `--polygon <path>`: GeoJSON/JSON with Polygon or MultiPolygon to spatially clip rows.
+- `--output-format parquet|geoparquet`: choose Parquet or GeoParquet output (defaults to GeoParquet if geometry is kept).
+- `--aws-profile`, `--aws-region`: forwarded to the wrapper when reading from S3.
+
+When running locally without Docker, install `pyarrow`, `pystac`, `shapely`, and `duckdb` and invoke the Python script with the same flags. The Docker wrapper mounts the repository to run entirely in-container and avoids host Python setup.
 
 ### Direct Python invocation
 

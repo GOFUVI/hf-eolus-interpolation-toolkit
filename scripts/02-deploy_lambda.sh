@@ -7,6 +7,29 @@ REPO_NAME="meteogalicia-processor"
 FUNCTION_NAME="MeteoGaliciaProcessor"
 PREFIX="meteo_parquet"
 
+wait_for_update() {
+  local function_name="$1"
+  local attempts=0
+  local status=""
+  while true; do
+    status=$(aws lambda get-function-configuration --function-name "$function_name" --profile "$PROFILE" --query 'LastUpdateStatus' --output text 2>/dev/null)
+    if [[ "$status" == "Successful" ]]; then
+      return 0
+    fi
+    if [[ "$status" == "Failed" ]]; then
+      echo "Error: Lambda update failed for $function_name (LastUpdateStatus=Failed)" >&2
+      return 1
+    fi
+    attempts=$((attempts+1))
+    if [[ $attempts -ge 30 ]]; then
+      echo "Error: Timeout waiting for Lambda $function_name to finish updating (status=$status)" >&2
+      return 1
+    fi
+    echo "Lambda $function_name update in progress (status=$status); waiting..."
+    sleep 2
+  done
+}
+
 NO_CACHE=false
 while getopts ":p:b:r:f:x:k" opt; do
   case $opt in
@@ -89,13 +112,15 @@ if [[ $? -ne 0 ]]; then
   aws lambda create-function --function-name "$FUNCTION_NAME" --package-type Image \
     --code ImageUri="$REPO_URI:latest" --role "$ROLE_ARN" --profile "$PROFILE" \
     --environment Variables="{DEST_BUCKET=$BUCKET,DEST_PREFIX=$PREFIX}" \
-    --memory-size 1024 --timeout 300
+    --memory-size 1024 --timeout 900
   echo "Función Lambda creada: $FUNCTION_NAME"
 else
   # Actualizar función Lambda existente (código e imagen)
   # Update function code
   aws lambda update-function-code --function-name "$FUNCTION_NAME" \
     --image-uri "$REPO_URI:latest" --publish --profile "$PROFILE"
+  echo "Waiting for function code update to finish..."
+  wait_for_update "$FUNCTION_NAME"
   # Retry updating function configuration (environment, memory, timeout) to avoid conflicts
   echo "Updating function configuration for environment variables, memory, and timeout..."
   attempts=0

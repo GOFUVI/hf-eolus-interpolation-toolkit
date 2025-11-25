@@ -460,35 +460,68 @@ def discover_assets(fs: pafs.FileSystem, base_path: str, extension_filter: Itera
 
         rel_path = PurePosixPath(os.path.relpath(info.path, base_path))
         partitions = parse_partitions(rel_path)
-        pf = pq.ParquetFile(info.path, filesystem=fs)
-        primary_geom, bbox = load_geo_metadata(pf)
-        if bbox is None:
-            bbox = scan_lon_lat_bbox(pf)
-        start, end = read_timestamp_bounds(pf)
-        if start is None or end is None:
-            start_part, end_part = partition_datetime(partitions)
-            start = start or start_part
-            end = end or end_part
-        records.append(
-            AssetRecord(
-                relative_path=rel_path,
-                partitions=partitions,
-                bbox=bbox,
-                start=ensure_utc(start),
-                end=ensure_utc(end),
-                row_count=pf.metadata.num_rows if pf.metadata else 0,
-                primary_geom=primary_geom,
+        pf = None
+        try:
+            pf = pq.ParquetFile(info.path, filesystem=fs)
+            primary_geom, bbox = load_geo_metadata(pf)
+            if bbox is None:
+                bbox = scan_lon_lat_bbox(pf)
+            start, end = read_timestamp_bounds(pf)
+            if start is None or end is None:
+                start_part, end_part = partition_datetime(partitions)
+                start = start or start_part
+                end = end or end_part
+            records.append(
+                AssetRecord(
+                    relative_path=rel_path,
+                    partitions=partitions,
+                    bbox=bbox,
+                    start=ensure_utc(start),
+                    end=ensure_utc(end),
+                    row_count=pf.metadata.num_rows if pf.metadata else 0,
+                    primary_geom=primary_geom,
+                )
             )
-        )
+        finally:
+            try:
+                if pf is not None:
+                    pf.close()
+            except Exception:
+                pass
     records.sort(key=lambda r: str(r.relative_path))
     return records
 
 
-def load_existing_items(catalog_dir: Path) -> List[Item]:
-    """Load previously generated STAC items from a catalog directory."""
+def load_existing_items(catalog_dir: Path, allowed_years: Optional[Set[str]] = None) -> List[Item]:
+    """Load previously generated STAC items from a catalog directory.
+
+    When allowed_years is provided, only items whose IDs start with one of those
+    years are loaded to reduce I/O.
+    """
     catalog_path = catalog_dir / "catalog.json"
     if not catalog_path.exists():
         return []
+
+    def item_matches(path: Path) -> bool:
+        if not allowed_years:
+            return True
+        stem = path.stem
+        return any(stem.startswith(year) for year in allowed_years)
+
+    # Fast path: manual scan of item JSONs to avoid loading the entire tree.
+    if allowed_years:
+        items: List[Item] = []
+        for item_file in sorted(catalog_dir.glob("**/*.json")):
+            if item_file.name == "catalog.json":
+                continue
+            if not item_matches(item_file):
+                continue
+            try:
+                items.append(Item.from_file(str(item_file)))
+            except Exception:
+                continue
+        return items
+
     try:
         catalog = Catalog.from_file(str(catalog_path))
     except Exception as exc:
@@ -629,6 +662,7 @@ def build_items_and_collection(
     args: argparse.Namespace,
     item_overrides: Optional[Dict[str, Any]] = None,
     collection_overrides: Optional[Dict[str, Any]] = None,
+    allowed_years: Optional[Set[str]] = None,
 ) -> Collection:
     """Main builder coordinating discovery, item creation, and collection save."""
     try:
@@ -646,6 +680,8 @@ def build_items_and_collection(
     plots_base: Optional[str] = None
     if args.plots_prefix:
         plots_fs, plots_base = resolve_fs_and_base(args.plots_prefix)
+    copy_assets = bool(getattr(args, "copy_assets", False))
+    asset_href_prefix = args.asset_href_prefix
 
     info = fs.get_file_info(base_path)
     if info.type != pafs.FileType.Directory:
@@ -713,7 +749,7 @@ def build_items_and_collection(
     existing_plot_ids: Set[str] = set()
 
     if getattr(args, "incremental", False):
-        for existing_item in load_existing_items(parquet_items_root):
+        for existing_item in load_existing_items(parquet_items_root, allowed_years):
             parquet_catalog.add_item(existing_item)
             has_parquet = True
             existing_parquet_ids.add(existing_item.id)
@@ -724,11 +760,11 @@ def build_items_and_collection(
                 source_model = existing_item.properties.get("source_model")
                 if source_model:
                     discovered_models.add(str(source_model))
-        for existing_item in load_existing_items(metadata_items_root):
+        for existing_item in load_existing_items(metadata_items_root, allowed_years):
             metadata_catalog.add_item(existing_item)
             has_metadata = True
             existing_metadata_ids.add(existing_item.id)
-        for existing_item in load_existing_items(plots_items_root):
+        for existing_item in load_existing_items(plots_items_root, allowed_years):
             plots_catalog.add_item(existing_item)
             has_plots = True
             existing_plot_ids.add(existing_item.id)
@@ -749,36 +785,59 @@ def build_items_and_collection(
             continue
 
         source_parquet_path = os.path.join(base_path, str(record.relative_path))
-        local_parquet_path = parquet_assets_root / record.relative_path
-        if not copy_from_fs(fs, source_parquet_path, local_parquet_path):
-            sys.exit(f"Failed to copy {source_parquet_path} into assets directory.")
+        local_parquet_path: Optional[Path] = None
+        pf: Optional[pq.ParquetFile] = None
+        try:
+            if copy_assets:
+                local_parquet_path = parquet_assets_root / record.relative_path
+                if not copy_from_fs(fs, source_parquet_path, local_parquet_path):
+                    sys.exit(f"Failed to copy {source_parquet_path} into assets directory.")
 
-        pf = pq.ParquetFile(source_parquet_path, filesystem=fs)
-        source_model_value = read_constant_column(pf, "source_model")
-        parquet_item = Item(
-            id=item_id,
-            geometry=geom,
-            bbox=list(bbox) if bbox else None,
-            datetime=dt,
-            properties={},
-        )
-        if source_model_value:
-            parquet_item.properties["source_model"] = source_model_value
-            discovered_models.add(str(source_model_value))
-        if record.start:
-            parquet_item.common_metadata.start_datetime = record.start
-        if record.end:
-            parquet_item.common_metadata.end_datetime = record.end
+            pf = pq.ParquetFile(source_parquet_path, filesystem=fs)
+            source_model_value = read_constant_column(pf, "source_model")
+            parquet_item = Item(
+                id=item_id,
+                geometry=geom,
+                bbox=list(bbox) if bbox else None,
+                datetime=dt,
+                properties={},
+            )
+            if source_model_value:
+                parquet_item.properties["source_model"] = source_model_value
+                discovered_models.add(str(source_model_value))
+            if record.start:
+                parquet_item.common_metadata.start_datetime = record.start
+            if record.end:
+                parquet_item.common_metadata.end_datetime = record.end
 
-        attach_table_metadata(parquet_item, pf)
+            attach_table_metadata(parquet_item, pf)
 
-        if record.row_count is not None:
-            parquet_item.properties["row_count"] = record.row_count
-        if record.primary_geom:
-            parquet_item.properties["primary_geometry_column"] = record.primary_geom
+            if record.row_count is not None:
+                parquet_item.properties["row_count"] = record.row_count
+            if record.primary_geom:
+                parquet_item.properties["primary_geometry_column"] = record.primary_geom
+        finally:
+            try:
+                if pf is not None:
+                    pf.close()
+            except Exception:
+                pass
 
         parquet_item_dir = Path(parquet_items_root) / item_id
-        asset_href = os.path.relpath(local_parquet_path, parquet_item_dir).replace(os.sep, "/")
+        if copy_assets and local_parquet_path is not None:
+            asset_href = os.path.relpath(local_parquet_path, parquet_item_dir).replace(os.sep, "/")
+        else:
+            href_prefix = asset_href_prefix or args.input_root
+            if href_prefix and "://" in href_prefix:
+                asset_href = build_href(href_prefix, record.relative_path)
+            elif href_prefix:
+                source_local_path = Path(href_prefix) / record.relative_path
+                try:
+                    asset_href = os.path.relpath(source_local_path, parquet_item_dir).replace(os.sep, "/")
+                except ValueError:
+                    asset_href = str(source_local_path)
+            else:
+                asset_href = str(record.relative_path)
         parquet_item.add_asset(
             "data",
             Asset(
@@ -817,8 +876,13 @@ def build_items_and_collection(
                 pass
             else:
                 metadata_source = os.path.join(metadata_base, str(metadata_rel))
-                local_metadata_path = metadata_assets_root / metadata_rel
-                if copy_from_fs(metadata_fs, metadata_source, local_metadata_path):
+                try:
+                    md_info = metadata_fs.get_file_info(metadata_source)
+                    metadata_exists = md_info.type == pafs.FileType.File
+                except Exception:
+                    metadata_exists = False
+
+                if metadata_exists:
                     metadata_item = Item(
                         id=metadata_item_id,
                         geometry=geom,
@@ -832,49 +896,69 @@ def build_items_and_collection(
                         metadata_item.common_metadata.end_datetime = record.end
 
                     metadata_item_dir = Path(metadata_items_root) / metadata_item_id
-                    metadata_href = os.path.relpath(local_metadata_path, metadata_item_dir).replace(os.sep, "/")
-                    metadata_item.add_asset(
-                        "metadata",
-                        Asset(
-                            href=metadata_href,
-                            media_type="application/json",
-                            roles=["metadata"],
-                            title="Interpolation metadata",
-                        ),
-                    )
-                    if item_overrides:
-                        base_md = metadata_item.to_dict(include_self_link=False)
-                        md_asset_hrefs = {
-                            key: asset.get("href") for key, asset in base_md.get("assets", {}).items()
-                        }
-                        merged_md = deep_merge_dict(base_md, item_overrides)
-                        for key, href in md_asset_hrefs.items():
-                            if (
-                                key in merged_md.get("assets", {})
-                                and "href" not in merged_md["assets"][key]
-                                and href is not None
-                            ):
-                                merged_md["assets"][key]["href"] = href
-                        metadata_item = Item.from_dict(merged_md)
-                    metadata_item.add_link(
-                        Link(
-                            rel="describes",
-                            target=parquet_item,
-                            media_type="application/geo+json",
-                            title=parquet_item.id,
+                    metadata_href = ""
+                    if copy_assets:
+                        local_metadata_path = metadata_assets_root / metadata_rel
+                        if not copy_from_fs(metadata_fs, metadata_source, local_metadata_path):
+                            metadata_href = ""
+                        else:
+                            metadata_href = os.path.relpath(local_metadata_path, metadata_item_dir).replace(os.sep, "/")
+                    else:
+                        href_base = args.metadata_prefix or asset_href_prefix or args.input_root
+                        if href_base and "://" in href_base:
+                            metadata_href = build_href(href_base, metadata_rel)
+                        elif href_base:
+                            source_local_path = Path(href_base) / metadata_rel
+                            try:
+                                metadata_href = os.path.relpath(source_local_path, metadata_item_dir).replace(os.sep, "/")
+                            except ValueError:
+                                metadata_href = str(source_local_path)
+                        else:
+                            metadata_href = str(metadata_rel)
+
+                    if metadata_href:
+                        metadata_item.add_asset(
+                            "metadata",
+                            Asset(
+                                href=metadata_href,
+                                media_type="application/json",
+                                roles=["metadata"],
+                                title="Interpolation metadata",
+                            ),
                         )
-                    )
-                    parquet_item.add_link(
-                        Link(
-                            rel="describedby",
-                            target=metadata_item,
-                            media_type="application/geo+json",
-                            title=metadata_item.id,
+                        if item_overrides:
+                            base_md = metadata_item.to_dict(include_self_link=False)
+                            md_asset_hrefs = {
+                                key: asset.get("href") for key, asset in base_md.get("assets", {}).items()
+                            }
+                            merged_md = deep_merge_dict(base_md, item_overrides)
+                            for key, href in md_asset_hrefs.items():
+                                if (
+                                    key in merged_md.get("assets", {})
+                                    and "href" not in merged_md["assets"][key]
+                                    and href is not None
+                                ):
+                                    merged_md["assets"][key]["href"] = href
+                            metadata_item = Item.from_dict(merged_md)
+                        metadata_item.add_link(
+                            Link(
+                                rel="describes",
+                                target=parquet_item,
+                                media_type="application/geo+json",
+                                title=parquet_item.id,
+                            )
                         )
-                    )
-                    metadata_catalog.add_item(metadata_item)
-                    existing_metadata_ids.add(metadata_item.id)
-                    has_metadata = True
+                        parquet_item.add_link(
+                            Link(
+                                rel="describedby",
+                                target=metadata_item,
+                                media_type="application/geo+json",
+                                title=metadata_item.id,
+                            )
+                        )
+                        metadata_catalog.add_item(metadata_item)
+                        existing_metadata_ids.add(metadata_item.id)
+                        has_metadata = True
 
         if plots_fs is not None and plots_base is not None:
             plot_dir = PurePosixPath(plots_base) / record.relative_path.parent
@@ -889,9 +973,6 @@ def build_items_and_collection(
                 if not plot_info.path.lower().endswith(".png"):
                     continue
                 rel_plot = relative_from_base(plot_info.path, plots_base)
-                local_plot_path = plots_assets_root / rel_plot
-                if not copy_from_fs(plots_fs, plot_info.path, local_plot_path):
-                    continue
                 plot_item_id = f"{item_id}-plot-{PurePosixPath(rel_plot).stem}"
                 if getattr(args, "incremental", False) and plot_item_id in existing_plot_ids:
                     continue
@@ -914,7 +995,26 @@ def build_items_and_collection(
                     plot_item.common_metadata.end_datetime = record.end
 
                 plot_item_dir = Path(plots_items_root) / plot_item_id
-                plot_href = os.path.relpath(local_plot_path, plot_item_dir).replace(os.sep, "/")
+                plot_href = ""
+                if copy_assets:
+                    local_plot_path = plots_assets_root / rel_plot
+                    if not copy_from_fs(plots_fs, plot_info.path, local_plot_path):
+                        continue
+                    plot_href = os.path.relpath(local_plot_path, plot_item_dir).replace(os.sep, "/")
+                else:
+                    href_base = args.plots_prefix or asset_href_prefix or args.input_root
+                    if href_base and "://" in href_base:
+                        plot_href = build_href(href_base, PurePosixPath(rel_plot))
+                    elif href_base:
+                        plot_source_path = Path(href_base) / rel_plot
+                        try:
+                            plot_href = os.path.relpath(plot_source_path, plot_item_dir).replace(os.sep, "/")
+                        except ValueError:
+                            plot_href = str(plot_source_path)
+                    else:
+                        plot_href = str(rel_plot)
+                if not plot_href:
+                    continue
                 plot_item.add_asset(
                     "plot",
                     Asset(
@@ -1158,6 +1258,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default="proprietary",
         help="Collection license string (defaults to 'proprietary').",
     )
+    parser.add_argument(
+        "--limit-years",
+        default=None,
+        help="Comma-separated list of years to load from existing items (reduces I/O during incremental builds).",
+    )
     return parser.parse_args(argv)
 
 
@@ -1167,6 +1272,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:  # pragma: no cover - CL
         parse_datetime(args.temporal_start)  # validate format
     if args.temporal_end:
         parse_datetime(args.temporal_end)
+    allowed_years: Optional[Set[str]] = None
+    if args.limit_years:
+        allowed_years = set(y.strip() for y in args.limit_years.split(",") if y.strip())
 
     overrides_dict: Optional[Dict[str, Any]] = None
     if args.item_overrides:
@@ -1190,7 +1298,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:  # pragma: no cover - CL
                 f"Failed to parse collection overrides JSON ({args.collection_overrides}): {exc}"
             )
 
-    collection = build_items_and_collection(args, overrides_dict, collection_overrides_dict)
+    collection = build_items_and_collection(args, overrides_dict, collection_overrides_dict, allowed_years)
 
     # Report summary to user
     total_items = len(list(collection.get_items()))

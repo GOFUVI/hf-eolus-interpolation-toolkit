@@ -1,13 +1,45 @@
 import os
 import re
+import shutil
+import socket
 import tempfile
+import time
+import urllib.error
+import urllib.request
+
 import boto3
 
 # Environment variables provided in the Lambda configuration
 DEST_BUCKET = os.environ.get("DEST_BUCKET", "")
 DEST_PREFIX = os.environ.get("DEST_PREFIX", "").rstrip("/")  # remove trailing '/' if present
+NETCDF_DOWNLOAD_RETRIES = max(1, int(os.environ.get("NETCDF_DOWNLOAD_RETRIES", "4")))
+NETCDF_DOWNLOAD_TIMEOUT = int(os.environ.get("NETCDF_DOWNLOAD_TIMEOUT", "60"))
+NETCDF_DOWNLOAD_BACKOFF = float(os.environ.get("NETCDF_DOWNLOAD_BACKOFF", "5"))
 
 s3_client = boto3.client('s3')
+
+
+def _download_with_retry(url, destination, timeout_seconds, retries, backoff_seconds):
+    """Download URL to destination with retry/backoff to survive transient network hiccups."""
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout_seconds) as response, open(destination, "wb") as out_file:
+                shutil.copyfileobj(response, out_file)
+            return
+        except (urllib.error.URLError, socket.timeout) as exc:
+            last_error = exc
+            print(f"WARNING: Download attempt {attempt}/{retries} failed for {url}: {exc}")
+        except Exception as exc:
+            last_error = exc
+            print(f"WARNING: Unexpected error downloading {url} (attempt {attempt}/{retries}): {exc}")
+
+        if attempt < retries:
+            sleep_time = backoff_seconds * attempt
+            print(f"INFO: Retrying download in {sleep_time} seconds...")
+            time.sleep(sleep_time)
+    if last_error:
+        raise last_error
 
 def _lambda_handler(event, context):
     """
@@ -58,13 +90,15 @@ def _lambda_handler(event, context):
     # Define temporary path to download NetCDF
     local_netcdf = os.path.join(tempfile.gettempdir(), "data.nc")
     try:
-        import urllib.request
-        with urllib.request.urlopen(url, timeout=60) as response:
-            content = response.read()
-        with open(local_netcdf, "wb") as f:
-            f.write(content)
+        _download_with_retry(
+            url,
+            local_netcdf,
+            timeout_seconds=NETCDF_DOWNLOAD_TIMEOUT,
+            retries=NETCDF_DOWNLOAD_RETRIES,
+            backoff_seconds=NETCDF_DOWNLOAD_BACKOFF,
+        )
     except Exception as e:
-        print(f"ERROR: Failed to download file {url}. Detail: {e}")
+        print(f"ERROR: Failed to download file {url} after retries. Detail: {e}")
         raise
 
     # Open the NetCDF file with xarray
